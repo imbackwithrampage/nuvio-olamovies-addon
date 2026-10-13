@@ -5,8 +5,9 @@ const fs = require('fs');
 const config = require('./config');
 const { getManifest } = require('./manifest');
 const scraper = require('./scraper');
-const { formatStreams } = require('./streams');
+const { resolveAllStreams } = require('./streams');
 const { resolveLink } = require('./resolver');
+const { getMetaFromCinemeta, searchCinemeta } = require('./cinemeta');
 const cache = require('./cache');
 
 const app = express();
@@ -19,21 +20,12 @@ app.use(express.static(path.join(process.cwd(), 'public')));
 function parseUserConfig(configParam) {
   if (!configParam) return {};
   try {
-    // Check if base64 encoded JSON
     const decoded = Buffer.from(configParam, 'base64').toString('utf8');
     if (decoded.startsWith('{') && decoded.endsWith('}')) {
       return JSON.parse(decoded);
     }
   } catch (e) {
-    // Try URI decode
-  }
-  try {
-    const uriDecoded = decodeURIComponent(configParam);
-    if (uriDecoded.startsWith('{') && uriDecoded.endsWith('}')) {
-      return JSON.parse(uriDecoded);
-    }
-  } catch (e) {
-    // Ignore
+    // Not base64 JSON
   }
   return {};
 }
@@ -75,9 +67,20 @@ async function handleCatalog(req, res, userConfig) {
     let items = [];
     if (searchQuery) {
       items = await scraper.search(searchQuery, baseUrl, proxy);
-      // Filter by type if specified
-      if (type) {
+      if (items.length > 0 && type) {
         items = items.filter(it => it.type === type);
+      }
+      // If OlaMovies search returned 0 items, fallback to Cinemeta search
+      if (items.length === 0) {
+        const cItems = await searchCinemeta(type || 'movie', searchQuery);
+        items = (cItems || []).map(m => ({
+          id: m.id,
+          type: m.type || type,
+          name: m.name,
+          poster: m.poster,
+          rawTitle: m.name,
+          year: m.year ? parseInt(m.year, 10) : null,
+        }));
       }
     } else {
       items = await scraper.getCatalog(id, baseUrl, proxy);
@@ -128,9 +131,43 @@ async function handleMeta(req, res, userConfig) {
       const itemType = parts[1] || type;
       const slug = parts.slice(2).join(':');
       details = await scraper.getItemDetails(itemType, slug, baseUrl, proxy);
+
+      if (!details) {
+        const cleanTitle = slug.replace(/-/g, ' ').replace(/\(\d{4}\)/g, '').trim();
+        const searchResults = await searchCinemeta(itemType, cleanTitle);
+        if (searchResults && searchResults.length > 0) {
+          const m = searchResults[0];
+          details = {
+            id: cleanId,
+            type: itemType,
+            title: m.name,
+            poster: m.poster,
+            synopsis: m.description,
+            imdbId: m.id,
+            files: [],
+          };
+        }
+      }
     } else if (cleanId.startsWith('tt')) {
       // IMDb ID
-      details = await scraper.findReleasesByImdbId(cleanId, type, baseUrl, proxy);
+      try {
+        details = await scraper.findReleasesByImdbId(cleanId, type, baseUrl, proxy);
+      } catch (e) {}
+
+      if (!details) {
+        const cMeta = await getMetaFromCinemeta(type, cleanId);
+        if (cMeta) {
+          details = {
+            id: cleanId,
+            type: cMeta.type || type,
+            title: cMeta.name,
+            poster: cMeta.poster,
+            synopsis: cMeta.description,
+            imdbId: cleanId,
+            files: [],
+          };
+        }
+      }
     }
 
     if (!details) {
@@ -200,11 +237,11 @@ async function handleStream(req, res, userConfig) {
 
   try {
     let details = null;
+    let imdbId = null;
     let season = null;
     let episode = null;
 
     if (cleanId.startsWith('olamovies:')) {
-      // Format: olamovies:type:slug or olamovies:type:slug:season:episode
       const parts = cleanId.split(':');
       const itemType = parts[1] || type;
       const slug = parts[2];
@@ -212,23 +249,43 @@ async function handleStream(req, res, userConfig) {
         season = parseInt(parts[3], 10);
         episode = parseInt(parts[4], 10);
       }
-      details = await scraper.getItemDetails(itemType, slug, baseUrl, proxy);
+
+      try {
+        details = await scraper.getItemDetails(itemType, slug, baseUrl, proxy);
+      } catch (e) {}
+
+      imdbId = details?.imdbId || null;
+      if (!imdbId) {
+        const searchTitle = (details?.title || slug).replace(/-/g, ' ').replace(/\(\d{4}\)/g, '').trim();
+        const searchResults = await searchCinemeta(itemType, searchTitle);
+        if (searchResults && searchResults.length > 0) {
+          imdbId = searchResults[0].id;
+        }
+      }
     } else if (cleanId.startsWith('tt')) {
-      // Format: tt1234567 or tt1234567:1:1
       const parts = cleanId.split(':');
-      const imdbId = parts[0];
+      imdbId = parts[0];
       if (parts[1] && parts[2]) {
         season = parseInt(parts[1], 10);
         episode = parseInt(parts[2], 10);
       }
-      details = await scraper.findReleasesByImdbId(imdbId, type, baseUrl, proxy);
+
+      try {
+        details = await scraper.findReleasesByImdbId(imdbId, type, baseUrl, proxy);
+      } catch (e) {}
     }
 
-    if (!details || !Array.isArray(details.files) || details.files.length === 0) {
-      return res.json({ streams: [] });
-    }
+    const streams = await resolveAllStreams({
+      type,
+      imdbId,
+      season,
+      episode,
+      olaFiles: details?.files || [],
+      userConfig,
+      reqHost: host,
+      reqProtocol: protocol,
+    });
 
-    const streams = formatStreams(details.files, host, protocol, userConfig, season, episode);
     res.setHeader('Cache-Control', 'max-age=1800, public');
     res.json({ streams });
   } catch (err) {
@@ -268,42 +325,22 @@ app.get('/api/search', async (req, res) => {
   const q = req.query.q || '';
   if (!q.trim()) return res.json([]);
   try {
-    const results = await scraper.search(q, req.query.baseUrl, req.query.proxyUrl);
+    let results = await scraper.search(q, req.query.baseUrl, req.query.proxyUrl);
+    if (!results || results.length === 0) {
+      const cResults = await searchCinemeta('movie', q);
+      results = (cResults || []).map(m => ({
+        id: `olamovies:${m.type || 'movie'}:${m.id}`,
+        type: m.type || 'movie',
+        name: m.name,
+        rawTitle: m.name,
+        year: m.year ? parseInt(m.year, 10) : null,
+        poster: m.poster,
+        url: `https://v6.olamovies.mov`,
+      }));
+    }
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/debug', async (req, res) => {
-  const target = req.query.url || 'https://v6.olamovies.mov/search?q=Deadpool%202';
-  try {
-    const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Sec-Ch-Ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
-      'Sec-Ch-Ua-Mobile': '?0',
-      'Sec-Ch-Ua-Platform': '"Windows"',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Upgrade-Insecure-Requests': '1',
-    };
-    const response = await fetch(target, { headers, signal: AbortSignal.timeout(10000) });
-    const text = await response.text();
-    res.json({
-      url: target,
-      status: response.status,
-      statusText: response.statusText,
-      headers: Object.fromEntries(response.headers.entries()),
-      bodyLength: text.length,
-      isCloudflareBlock: text.includes('cf-mitigated') || text.includes('Just a moment') || response.status === 403,
-      snippet: text.slice(0, 500)
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 
@@ -321,7 +358,7 @@ app.get('/api/item', async (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.0.0',
+    version: '1.2.0',
     target: config.BASE_URL,
     cacheItems: cache.size(),
     uptime: process.uptime(),

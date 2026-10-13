@@ -32,6 +32,8 @@ async function getMetaFromCinemeta(type, imdbId) {
       year: data.meta.year ? parseInt(data.meta.year, 10) : null,
       type: data.meta.type || type,
       imdb_id: imdbId,
+      poster: data.meta.poster,
+      description: data.meta.description,
     };
 
     cache.set(cacheKey, meta, 1000 * 60 * 60 * 24); // 24 hours cache
@@ -42,6 +44,36 @@ async function getMetaFromCinemeta(type, imdbId) {
   }
 }
 
+/**
+ * Search Cinemeta by title
+ * @param {string} type - 'movie' or 'series'
+ * @param {string} query - search query
+ */
+async function searchCinemeta(type, query) {
+  const cacheKey = `cinemeta_search:${type}:${query.toLowerCase().trim()}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const url = `${config.CINEMETA_URL}/catalog/${type}/top/search=${encodeURIComponent(query)}.json`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': config.USER_AGENT },
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (!res.ok) return [];
+
+    const data = await res.json();
+    const results = (data && data.metas) || [];
+    cache.set(cacheKey, results, 1000 * 60 * 60 * 12);
+    return results;
+  } catch (err) {
+    console.warn(`[Cinemeta] Search failed for ${query}:`, err.message);
+    return [];
+  }
+}
+
 module.exports = {
   getMetaFromCinemeta,
+  searchCinemeta,
 };
