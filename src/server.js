@@ -272,6 +272,30 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
+app.get('/api/debug', async (req, res) => {
+  const target = req.query.url || 'https://v6.olamovies.mov/search?q=Deadpool%202';
+  try {
+    const headers = {
+      'User-Agent': config.USER_AGENT,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+    };
+    const response = await fetch(target, { headers, signal: AbortSignal.timeout(10000) });
+    const text = await response.text();
+    res.json({
+      url: target,
+      status: response.status,
+      statusText: response.statusText,
+      headers: Object.fromEntries(response.headers.entries()),
+      bodyLength: text.length,
+      isCloudflareBlock: text.includes('cf-mitigated') || text.includes('Just a moment') || response.status === 403,
+      snippet: text.slice(0, 500)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 app.get('/api/item', async (req, res) => {
   const { type, slug } = req.query;
   if (!type || !slug) return res.status(400).json({ error: 'type and slug required' });
