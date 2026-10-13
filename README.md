@@ -1,6 +1,10 @@
 # Nuvio & Stremio OlaMovies Addon 🎬
 
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/imbackwithrampage/nuvio-olamovies-addon)
+
 A high-performance **Nuvio** and **Stremio** Addon service that scrapes and resolves 4K UHD, 1080p, 720p, HEVC, and multi-audio releases from **OlaMovies** (`https://v6.olamovies.mov`).
+
+Repository: [https://github.com/imbackwithrampage/nuvio-olamovies-addon](https://github.com/imbackwithrampage/nuvio-olamovies-addon)
 
 ---
 
