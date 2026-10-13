@@ -60,6 +60,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 async function handleCatalog(req, res, userConfig) {
   const { type, id, extra } = req.params;
   const baseUrl = userConfig.baseUrl || config.BASE_URL;
+  const proxy = userConfig.proxyUrl || userConfig.flaresolverrUrl || config.PROXY_URL;
 
   let searchQuery = null;
   let skip = 0;
@@ -73,13 +74,13 @@ async function handleCatalog(req, res, userConfig) {
   try {
     let items = [];
     if (searchQuery) {
-      items = await scraper.search(searchQuery, baseUrl);
+      items = await scraper.search(searchQuery, baseUrl, proxy);
       // Filter by type if specified
       if (type) {
         items = items.filter(it => it.type === type);
       }
     } else {
-      items = await scraper.getCatalog(id, baseUrl);
+      items = await scraper.getCatalog(id, baseUrl, proxy);
     }
 
     const metas = items.slice(skip, skip + 50).map(item => ({
@@ -116,6 +117,7 @@ async function handleMeta(req, res, userConfig) {
   const { type, id } = req.params;
   const cleanId = id.replace(/\.json$/, '');
   const baseUrl = userConfig.baseUrl || config.BASE_URL;
+  const proxy = userConfig.proxyUrl || userConfig.flaresolverrUrl || config.PROXY_URL;
 
   try {
     let details = null;
@@ -125,10 +127,10 @@ async function handleMeta(req, res, userConfig) {
       const parts = cleanId.split(':');
       const itemType = parts[1] || type;
       const slug = parts.slice(2).join(':');
-      details = await scraper.getItemDetails(itemType, slug, baseUrl);
+      details = await scraper.getItemDetails(itemType, slug, baseUrl, proxy);
     } else if (cleanId.startsWith('tt')) {
       // IMDb ID
-      details = await scraper.findReleasesByImdbId(cleanId, type, baseUrl);
+      details = await scraper.findReleasesByImdbId(cleanId, type, baseUrl, proxy);
     }
 
     if (!details) {
@@ -193,6 +195,7 @@ async function handleStream(req, res, userConfig) {
   const { type, id } = req.params;
   const cleanId = id.replace(/\.json$/, '');
   const baseUrl = userConfig.baseUrl || config.BASE_URL;
+  const proxy = userConfig.proxyUrl || userConfig.flaresolverrUrl || config.PROXY_URL;
   const { protocol, host } = getRequestOrigin(req);
 
   try {
@@ -209,7 +212,7 @@ async function handleStream(req, res, userConfig) {
         season = parseInt(parts[3], 10);
         episode = parseInt(parts[4], 10);
       }
-      details = await scraper.getItemDetails(itemType, slug, baseUrl);
+      details = await scraper.getItemDetails(itemType, slug, baseUrl, proxy);
     } else if (cleanId.startsWith('tt')) {
       // Format: tt1234567 or tt1234567:1:1
       const parts = cleanId.split(':');
@@ -218,7 +221,7 @@ async function handleStream(req, res, userConfig) {
         season = parseInt(parts[1], 10);
         episode = parseInt(parts[2], 10);
       }
-      details = await scraper.findReleasesByImdbId(imdbId, type, baseUrl);
+      details = await scraper.findReleasesByImdbId(imdbId, type, baseUrl, proxy);
     }
 
     if (!details || !Array.isArray(details.files) || details.files.length === 0) {
@@ -265,7 +268,7 @@ app.get('/api/search', async (req, res) => {
   const q = req.query.q || '';
   if (!q.trim()) return res.json([]);
   try {
-    const results = await scraper.search(q);
+    const results = await scraper.search(q, req.query.baseUrl, req.query.proxyUrl);
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -308,7 +311,7 @@ app.get('/api/item', async (req, res) => {
   const { type, slug } = req.query;
   if (!type || !slug) return res.status(400).json({ error: 'type and slug required' });
   try {
-    const item = await scraper.getItemDetails(type, slug);
+    const item = await scraper.getItemDetails(type, slug, req.query.baseUrl, req.query.proxyUrl);
     res.json(item || {});
   } catch (err) {
     res.status(500).json({ error: err.message });

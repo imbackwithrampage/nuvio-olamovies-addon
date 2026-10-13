@@ -3,9 +3,9 @@ const cache = require('./cache');
 const { getMetaFromCinemeta } = require('./cinemeta');
 
 /**
- * Fetch HTML text from OlaMovies with browser headers
+ * Fetch HTML text from OlaMovies with browser headers and proxy fallback
  */
-async function fetchHtml(url, customBaseUrl) {
+async function fetchHtml(url, customBaseUrl, customProxy) {
   const targetUrl = customBaseUrl && url.startsWith(config.BASE_URL)
     ? url.replace(config.BASE_URL, customBaseUrl)
     : url;
@@ -24,16 +24,41 @@ async function fetchHtml(url, customBaseUrl) {
     'Upgrade-Insecure-Requests': '1',
   };
 
-  const res = await fetch(targetUrl, {
-    headers,
-    signal: AbortSignal.timeout(12000),
-  });
+  const proxy = customProxy || config.PROXY_URL;
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch ${targetUrl}: HTTP ${res.status}`);
+  const fetchViaProxy = async () => {
+    if (!proxy) throw new Error('No proxy configured');
+    const proxyUrl = `${proxy.replace(/\/$/, '')}/?url=${encodeURIComponent(targetUrl)}`;
+    const res = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(12000) });
+    if (!res.ok) throw new Error(`Proxy failed with HTTP ${res.status}`);
+    const text = await res.text();
+    if (text.includes('cf-mitigated') || text.includes('Just a moment')) {
+      throw new Error('Proxy returned Cloudflare challenge');
+    }
+    return text;
+  };
+
+  const fetchDirect = async () => {
+    const res = await fetch(targetUrl, { headers, signal: AbortSignal.timeout(10000) });
+    const text = await res.text();
+    if (res.status === 403 || text.includes('cf-mitigated') || text.includes('Just a moment')) {
+      throw new Error(`Cloudflare challenge detected (${res.status})`);
+    }
+    return text;
+  };
+
+  // If proxy is configured, use proxy first (prevents Cloudflare 403 on Vercel/serverless)
+  if (proxy) {
+    try {
+      return await fetchViaProxy();
+    } catch (proxyErr) {
+      console.warn('[Scraper] Proxy fetch failed, falling back to direct:', proxyErr.message);
+      return await fetchDirect();
+    }
   }
 
-  return await res.text();
+  // Otherwise direct
+  return await fetchDirect();
 }
 
 /**
@@ -59,7 +84,7 @@ function parseCards(html, customBaseUrl) {
   const items = [];
   const seenSlugs = new Set();
 
-  // 1. First priority: Target "group/card" chunks (actual search results and category grids)
+  // 1. Target "group/card" chunks (actual search results and category grids)
   for (const chunk of chunks) {
     if (!chunk.includes('group/card')) continue;
 
@@ -144,14 +169,14 @@ function parseItemPage(html, slug, type, customBaseUrl) {
   const chunks = extractRscChunks(html);
   const fullText = chunks.length > 0 ? chunks.join('\n') : html;
 
-  // Extract IMDb ID from page link (e.g. imdb.com/title/tt1431045)
+  // Extract IMDb ID
   let imdbId = null;
   const imdbMatch = html.match(/imdb\.com\/title\/(tt\d+)/i) || fullText.match(/tt\d{6,8}/);
   if (imdbMatch) {
     imdbId = imdbMatch[1] || imdbMatch[0];
   }
 
-  // Extract Title from og:title, <title> or <h1>
+  // Extract Title
   let title = slug.replace(/-/g, ' ');
   const ogTitleMatch = html.match(/property="og:title"\s+content="([^"]+)"/i) ||
                        html.match(/<title>([^<]+)<\/title>/i);
@@ -159,7 +184,7 @@ function parseItemPage(html, slug, type, customBaseUrl) {
     title = ogTitleMatch[1].replace(/~ OM Official.*$/i, '').trim();
   }
 
-  // Extract Poster from og:image
+  // Extract Poster
   let poster = '';
   const ogImageMatch = html.match(/property="og:image"\s+content="([^"]+)"/i);
   if (ogImageMatch) {
@@ -178,7 +203,7 @@ function parseItemPage(html, slug, type, customBaseUrl) {
     synopsis = synMatch[1].replace(/\\"/g, '"');
   }
 
-  // Extract releases and files from "blocks":[...]
+  // Extract releases and files
   const blocks = [];
   const files = [];
 
@@ -222,7 +247,7 @@ function parseItemPage(html, slug, type, customBaseUrl) {
     }
   }
 
-  // Fallback: regex search for files if blocks parsing failed
+  // Fallback: regex search for files
   if (files.length === 0) {
     const fileRegex = /"btnId":"([^"]+)","url":"([^"]+)","label":"([^"]+)"[\s\S]*?"filename":"([^"]+)"[\s\S]*?"filesize":"([^"]+)"/g;
     let fileMatch;
@@ -254,7 +279,7 @@ function parseItemPage(html, slug, type, customBaseUrl) {
 /**
  * Search OlaMovies
  */
-async function search(query, customBaseUrl) {
+async function search(query, customBaseUrl, customProxy) {
   const cacheKey = `search:${query}:${customBaseUrl || 'default'}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
@@ -263,7 +288,7 @@ async function search(query, customBaseUrl) {
   const searchUrl = `${baseUrl}/search?q=${encodeURIComponent(query)}`;
 
   try {
-    const html = await fetchHtml(searchUrl, baseUrl);
+    const html = await fetchHtml(searchUrl, baseUrl, customProxy);
     const results = parseCards(html, baseUrl);
     cache.set(cacheKey, results, 1000 * 60 * 15); // 15 mins
     return results;
@@ -276,7 +301,7 @@ async function search(query, customBaseUrl) {
 /**
  * Get catalog items for category
  */
-async function getCatalog(catalogId, customBaseUrl) {
+async function getCatalog(catalogId, customBaseUrl, customProxy) {
   const cacheKey = `catalog:${catalogId}:${customBaseUrl || 'default'}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
@@ -290,7 +315,7 @@ async function getCatalog(catalogId, customBaseUrl) {
   }
 
   try {
-    const html = await fetchHtml(`${baseUrl}${path}`, baseUrl);
+    const html = await fetchHtml(`${baseUrl}${path}`, baseUrl, customProxy);
     const items = parseCards(html, baseUrl);
     cache.set(cacheKey, items, 1000 * 60 * 30); // 30 mins
     return items;
@@ -303,7 +328,7 @@ async function getCatalog(catalogId, customBaseUrl) {
 /**
  * Get details for a single item by slug and type
  */
-async function getItemDetails(type, slug, customBaseUrl) {
+async function getItemDetails(type, slug, customBaseUrl, customProxy) {
   const cacheKey = `item:${type}:${slug}:${customBaseUrl || 'default'}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
@@ -313,7 +338,7 @@ async function getItemDetails(type, slug, customBaseUrl) {
   const url = `${baseUrl}${path}`;
 
   try {
-    const html = await fetchHtml(url, baseUrl);
+    const html = await fetchHtml(url, baseUrl, customProxy);
     const details = parseItemPage(html, slug, type, baseUrl);
     cache.set(cacheKey, details, 1000 * 60 * 60); // 1 hour
     return details;
@@ -326,7 +351,7 @@ async function getItemDetails(type, slug, customBaseUrl) {
 /**
  * Find releases and files by IMDb ID
  */
-async function findReleasesByImdbId(imdbId, type, customBaseUrl) {
+async function findReleasesByImdbId(imdbId, type, customBaseUrl, customProxy) {
   const cacheKey = `imdb:${type}:${imdbId}:${customBaseUrl || 'default'}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
@@ -341,7 +366,7 @@ async function findReleasesByImdbId(imdbId, type, customBaseUrl) {
   searchTerms.push(imdbId);
 
   for (const term of searchTerms) {
-    const results = await search(term, customBaseUrl);
+    const results = await search(term, customBaseUrl, customProxy);
     if (results.length > 0) {
       let bestMatch = results[0];
       if (meta && meta.year) {
@@ -349,7 +374,7 @@ async function findReleasesByImdbId(imdbId, type, customBaseUrl) {
         if (yearMatch) bestMatch = yearMatch;
       }
 
-      const details = await getItemDetails(bestMatch.type, bestMatch.slug, customBaseUrl);
+      const details = await getItemDetails(bestMatch.type, bestMatch.slug, customBaseUrl, customProxy);
       if (details && details.files && details.files.length > 0) {
         cache.set(cacheKey, details, 1000 * 60 * 60);
         return details;

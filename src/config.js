@@ -6,6 +6,7 @@ const config = {
   CACHE_TTL_MS: parseInt(process.env.CACHE_TTL_MS, 10) || 1000 * 60 * 30, // 30 minutes
   USER_AGENT: process.env.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   CINEMETA_URL: 'https://v3-cinemeta.strem.io',
+  PROXY_URL: process.env.PROXY_URL || 'https://restless-cake-e3ec.cloudflare-survey470.workers.dev',
 };
 
 module.exports = config;
