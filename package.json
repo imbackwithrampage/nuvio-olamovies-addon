@@ -1,0 +1,25 @@
+{
+  "name": "nuvio-olamovies-addon",
+  "version": "1.0.0",
+  "description": "Nuvio & Stremio Addon for OlaMovies - High quality movies and TV series catalog & streams",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node src/test.js"
+  },
+  "keywords": [
+    "nuvio",
+    "stremio",
+    "stremio-addon",
+    "olamovies",
+    "streaming"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

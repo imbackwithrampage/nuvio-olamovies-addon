@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: nuvio-olamovies-addon
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 7000
+      - key: OLA_BASE_URL
+        value: https://v6.olamovies.mov
